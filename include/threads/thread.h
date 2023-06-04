@@ -95,6 +95,17 @@ struct thread {
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem;              /* List element. */
 
+	int64_t wakeup_tick;
+
+	int init_priority;
+	struct lock *wait_on_lock;
+	struct list donations;
+	struct list_elem donation_elem;
+
+	int nice;
+	int recent_cpu;
+	struct list_elem all_elem;
+
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
@@ -142,5 +153,24 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 void do_iret (struct intr_frame *tf);
+
+int64_t get_tick_awake (void);
+void next_tick_awake (int64_t ticks);
+void thread_sleep (int64_t ticks);
+void thread_awake (int64_t ticks);
+
+void preemption_priority (void);
+bool compare_priority (struct list_elem *higher, struct list_elem *lower, void *aux UNUSED);
+bool compare_donation_priority (const struct list_elem *higher, const struct list_elem *lower, void *aux UNUSED);
+void donate_priority (void);
+void refresh_priority (void);
+void remove_with_lock (struct lock *lock);
+
+void mlfqs_priority (struct thread *t);
+void mlfqs_recent_cpu (struct thread *t);
+void mlfqs_load_avg (void);
+void mlfqs_increment (void);
+void mlfqs_recalc_priority (void);
+void mlfqs_recalc_recent_cpu (void);
 
 #endif /* threads/thread.h */
