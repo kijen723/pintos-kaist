@@ -6,6 +6,7 @@
 #include <string.h>
 #include "threads/fixed_point.h"
 #include "threads/flags.h"
+#include "threads/malloc.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
 #include "threads/palloc.h"
@@ -220,6 +221,22 @@ thread_create (const char *name, int priority,
 
 	/* Add to run queue. */
 	list_push_back (&all_list, &t->all_elem);
+
+	t->parent_t = thread_current ();
+	sema_init (&t->sema_exit, 0);
+	sema_init (&t->sema_fork, 0);
+	sema_init (&t->sema_wait, 0);
+
+	list_push_back (&thread_current ()->children_list, &t->child_elem);
+
+	t->fdt = palloc_get_page (PAL_ZERO);
+	if (t->fdt == NULL)
+		return TID_ERROR;
+
+	t->fdt[0] = 1;
+	t->fdt[1] = 2;
+	t->next_fd = 2;
+
 	thread_unblock (t);
 	preemption_priority ();
 
@@ -467,6 +484,7 @@ init_thread (struct thread *t, const char *name, int priority) {
 
 	t->nice = NICE_DEFAULT;
 	t->recent_cpu = RECENT_CPU_DEFAULT;
+	list_init (&t->children_list);
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
