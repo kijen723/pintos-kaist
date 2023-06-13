@@ -91,9 +91,17 @@ struct thread {
 	enum thread_status status;          /* Thread state. */
 	char name[16];                      /* Name (for debugging purposes). */
 	int priority;                       /* Priority. */
+	int64_t wakeup_tick;
+	int init_priority;
+	int nice;
+	int recent_cpu;
 
 	/* Shared between thread.c and synch.c. */
+	struct lock *wait_on_lock;
+	struct list donations;
+	struct list_elem donation_elem;
 	struct list_elem elem;              /* List element. */
+	struct list_elem all_elem;
 
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
@@ -142,5 +150,25 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 void do_iret (struct intr_frame *tf);
+
+int64_t get_awake_tick (void);
+void next_awake_tick (int64_t ticks);
+void thread_sleep (int64_t ticks);
+void thread_awake (int64_t ticks);
+
+bool compare_priority (struct list_elem *a, struct list_elem *b, void *aux);
+void preemption_priority (void);
+
+bool compare_donation_priority (const struct list_elem *a, const struct list_elem *b, void *aux);
+void donate_priority (void);
+void remove_donations_lock (struct lock *lock);
+void reset_priority (void);
+
+void mlfqs_increase_recent_cpu (void);
+void mlfqs_recalc_priority (void);
+void mlfqs_recalc_recent_cpu (void);
+void mlfqs_update_priority (struct thread *t);
+void mlfqs_update_recent_cpu (struct thread *t);
+void mlfqs_update_load_avg (void);
 
 #endif /* threads/thread.h */
