@@ -219,6 +219,19 @@ thread_create (const char *name, int priority,
 
 	/* Add to run queue. */
 	list_push_back (&all_list, &t->all_elem);
+	list_push_back (&thread_current ()->child_list, &t->child_elem);
+
+	sema_init (&t->sema_exit, 0);
+	sema_init (&t->sema_fork, 0);
+	sema_init (&t->sema_wait, 0);
+	
+	t->fdt = palloc_get_page (PAL_ZERO);
+	if (t->fdt == NULL)
+		return TID_ERROR;
+	t->fdt[0] = 1;
+	t->fdt[1] = 2;
+	t->next_fd = 2;
+
 	thread_unblock (t);
 	preemption_priority ();
 
@@ -462,6 +475,7 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->init_priority = priority;
 	t->wait_on_lock = NULL;
 	list_init (&t->donations);
+	list_init (&t->child_list);
 	t->nice = NICE_DEFAULT;
 	t->recent_cpu = RECENT_CPU_DEFAULT;
 }
