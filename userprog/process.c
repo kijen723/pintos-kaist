@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "userprog/gdt.h"
+#include "userprog/syscall.h"
 #include "userprog/tss.h"
 #include "filesys/directory.h"
 #include "filesys/file.h"
@@ -81,14 +82,16 @@ process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	// return thread_create (name,
 	// 		PRI_DEFAULT, __do_fork, thread_current ());
 	struct thread *cur = thread_current ();
+	memcpy (&cur->ptf, if_, sizeof (struct intr_frame));
 	tid_t ctid = thread_create (name, PRI_DEFAULT, __do_fork, cur);
 
 	if (ctid == TID_ERROR)
 		return TID_ERROR;
 
 	struct thread *child = get_child_process (ctid);
-	
-	sema_down (&cur->sema_fork);
+	sema_down (&child->sema_fork);
+	if (child->exit_status < 0)
+		return process_wait (ctid);
 	return ctid;
 }
 
@@ -174,27 +177,55 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
-	struct file **table = parent->fdt;
+	if (parent->next_fd >= 128)
+		goto error;
 
-	for (int i = 2; i < 128; i++) {
-		if (table[i]) {
-			current->fdt[i] = file_duplicate (table[i]);
-		} else {
-			current->fdt[i] = NULL;
+	const int MAPLEN = 10;
+	struct MapElem map[10];
+	int dup_idx = 0;
+	bool found;
+
+	for (int i = 0; i < 128; i++) {
+		struct file *f = parent->fdt[i];
+
+		if (f == NULL)
+			continue;
+
+		found = false;
+
+		for (int j = 0; j < MAPLEN; j++) {
+			if (map[j].key == f) {
+				found = true;
+				current->fdt[i] = map[j].value;
+				break;
+			}
+		}
+
+		if (!found) {
+			struct file *new_f;
+			if (f > 2)
+				new_f = file_duplicate (f);
+			else
+				new_f = f;
+
+			current->fdt[i] = new_f;
+
+			if (dup_idx < MAPLEN) {
+				map[dup_idx].key = f;
+				map[dup_idx++].value = new_f;
+			}
 		}
 	}
 
 	current->next_fd = parent->next_fd;
- 	sema_up (&parent->sema_fork);
-	process_init ();
+	sema_up (&current->sema_fork);
 
 	/* Finally, switch to the newly created process. */
 	if (succ)
 		do_iret (&if_);
 error:
-	// thread_exit ();
-	sema_up (&parent->sema_fork);
-	exit (TID_ERROR);
+	sema_up (&current->sema_fork);
+	exit (-1);
 }
 
 /* Switch the current execution context to the f_name.
@@ -214,6 +245,7 @@ process_exec (void *f_name) {
 
 	/* We first kill the current context */
 	process_cleanup ();
+	supplemental_page_table_init (&thread_current ()->spt.table);
 
 	/* And then load the binary */
 	success = load (file_name, &_if);
@@ -243,6 +275,9 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+	if (child_tid < 0)
+		return -1;
+
 	struct thread *child = get_child_process(child_tid);
 
 	if (child == NULL)
@@ -267,17 +302,13 @@ process_exit (void) {
 	if (curr->running_file)
 		file_close (curr->running_file);
 
-	for (int i = 2; i < 128; i++) {
-		if (table[i]) {
-			file_close (table[i]);
-			table[i] = NULL;
-		}
-	}
+	for (int i = 0; i < 128; i++)
+		close (i);
 
+	palloc_free_page (table);
+	process_cleanup ();
 	sema_up(&curr->sema_wait);
 	sema_down(&curr->sema_exit);
-	palloc_free_page(table);
-	process_cleanup ();
 }
 
 /* Free the current process's resources. */
@@ -405,12 +436,17 @@ load (const char *file_name, struct intr_frame *if_) {
 	process_activate (thread_current ());
 
 	/* Open executable file. */
+	lock_acquire (&filesys_lock);
 	file = filesys_open (file_name);
+	lock_release (&filesys_lock);
 	if (file == NULL) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
+	thread_current ()->running_file = file;
+	file_deny_write (file);
 
+	lock_acquire (&filesys_lock);
 	/* Read and verify executable header. */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
@@ -422,6 +458,7 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: error loading executable\n", file_name);
 		goto done;
 	}
+	lock_release (&filesys_lock);
 
 	/* Read program headers. */
 	file_ofs = ehdr.e_phoff;
@@ -430,10 +467,13 @@ load (const char *file_name, struct intr_frame *if_) {
 
 		if (file_ofs < 0 || file_ofs > file_length (file))
 			goto done;
+		lock_acquire (&filesys_lock);
 		file_seek (file, file_ofs);
-
-		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
+		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr) {
+			lock_release (&filesys_lock);
 			goto done;
+		}
+		lock_release (&filesys_lock);
 		file_ofs += sizeof phdr;
 		switch (phdr.p_type) {
 			case PT_NULL:
@@ -486,8 +526,6 @@ load (const char *file_name, struct intr_frame *if_) {
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 	argument_stack (argv, argc, if_);
-	t->running_file = file;
-	file_deny_write (file);
 
 	success = true;
 
@@ -651,6 +689,23 @@ lazy_load_segment (struct page *page, void *aux) {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+	struct file_info *file_info = (struct file_info *) aux;
+	struct file *file = file_info->file;
+	off_t ofs = file_info->ofs;
+	int page_read_bytes = file_info->page_read_bytes;
+	int page_zero_bytes = file_info->page_zero_bytes;
+	int temp;
+
+	file_seek (file, ofs);
+
+	if ((temp = file_read (file, page->frame->kva, page_read_bytes)) != page_read_bytes) {
+		free (file_info);
+		return false;
+	}
+
+	memset (page->frame->kva + page_read_bytes, 0, page_zero_bytes);
+
+	return true;
 }
 
 /* Loads a segment starting at offset OFS in FILE at address
@@ -682,7 +737,11 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
-		void *aux = NULL;
+		struct file_info *aux = (struct file_info *) malloc (sizeof (struct file_info));
+		aux->file = file;
+		aux->ofs = ofs;
+		aux->page_read_bytes = page_read_bytes;
+		aux->page_zero_bytes = page_zero_bytes;
 		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
 					writable, lazy_load_segment, aux))
 			return false;
@@ -691,6 +750,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
+		ofs += PGSIZE;
 	}
 	return true;
 }
@@ -705,6 +765,14 @@ setup_stack (struct intr_frame *if_) {
 	 * TODO: If success, set the rsp accordingly.
 	 * TODO: You should mark the page is stack. */
 	/* TODO: Your code goes here */
+	if (!vm_alloc_page_with_initializer (VM_ANON, stack_bottom, true, NULL, NULL))
+		return success;
+
+	if (!vm_claim_page (stack_bottom))
+		return success;
+
+	if_->rsp = USER_STACK;
+	success = true;
 
 	return success;
 }
@@ -712,32 +780,30 @@ setup_stack (struct intr_frame *if_) {
 
 void
 argument_stack (char **argv, int argc, struct intr_frame *if_) {
-	char *argv_address[128];
-
 	for (int i = argc - 1; i >= 0; i--) {
 		if_->rsp -= (strlen (argv[i]) + 1);
 		memcpy (if_->rsp, argv[i], strlen (argv[i]) + 1);
-		argv_address[i] = if_->rsp;
+		argv[i] = (char *) if_->rsp;
 	}
 
-	while (if_->rsp % 8 != 0) {
-		if_->rsp--;
-		*(uint8_t *) if_->rsp = 0;
-	}
+	int align = if_->rsp % 8;
+	if_->rsp -= align;
+	memset (if_->rsp, 0, align);
 
 	if_->rsp -= 8;
-	*(char *) if_->rsp = 0;
+	memset (if_->rsp, 0, 8);
 
 	for (int i = argc - 1; i >= 0; i--) {
 		if_->rsp -= 8;
-		memcpy (if_->rsp, &argv_address[i], strlen (&argv_address[i]));
+		memcpy (if_->rsp, &argv[i], 8);
 	}
 
 	if_->rsp -= 8;
-	memset(if_->rsp, 0, sizeof(void *));
+	memset (if_->rsp, 0, 8);
 
 	if_->R.rsi = if_->rsp + 8;
 	if_->R.rdi = argc;
+	thread_current ()->user_rsp = if_->rsp;
 }
 
 struct thread *

@@ -188,10 +188,13 @@ lock_init (struct lock *lock) {
    we need to sleep. */
 void
 lock_acquire (struct lock *lock) {
+	enum intr_level old_level;
+
 	ASSERT (lock != NULL);
 	ASSERT (!intr_context ());
 	ASSERT (!lock_held_by_current_thread (lock));
 
+	old_level = intr_disable ();
 	struct thread *cur = thread_current ();
 
 	if (lock->holder) {
@@ -205,6 +208,7 @@ lock_acquire (struct lock *lock) {
 	sema_down (&lock->semaphore);
 	cur->wait_on_lock = NULL;
 	lock->holder = thread_current ();
+	intr_set_level (old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -234,9 +238,12 @@ lock_try_acquire (struct lock *lock) {
    handler. */
 void
 lock_release (struct lock *lock) {
+	enum intr_level old_level;
+
 	ASSERT (lock != NULL);
 	ASSERT (lock_held_by_current_thread (lock));
 
+	old_level = intr_disable ();
 	lock->holder = NULL;
 
 	if (!thread_mlfqs) {
@@ -245,6 +252,7 @@ lock_release (struct lock *lock) {
 	}
 
 	sema_up (&lock->semaphore);
+	intr_set_level (old_level);
 }
 
 /* Returns true if the current thread holds LOCK, false

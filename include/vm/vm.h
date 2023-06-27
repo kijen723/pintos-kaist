@@ -1,6 +1,7 @@
 #ifndef VM_VM_H
 #define VM_VM_H
 #include <stdbool.h>
+#include "lib/kernel/hash.h"
 #include "threads/palloc.h"
 
 enum vm_type {
@@ -46,6 +47,12 @@ struct page {
 	struct frame *frame;   /* Back reference for frame */
 
 	/* Your implementation */
+	bool writable;
+	uint64_t pml4;
+
+	struct hash_elem hash_elem;
+	struct list_elem mmap_elem;
+	struct list_elem cow_elem;
 
 	/* Per-type data are binded into the union.
 	 * Each function automatically detects the current union */
@@ -63,6 +70,10 @@ struct page {
 struct frame {
 	void *kva;
 	struct page *page;
+	uint64_t *pml4;
+	int cow_cnt;
+	struct list child_pages;
+	struct list_elem elem;
 };
 
 /* The function table for page operations.
@@ -85,6 +96,14 @@ struct page_operations {
  * We don't want to force you to obey any specific design for this struct.
  * All designs up to you for this. */
 struct supplemental_page_table {
+	struct hash table;
+};
+
+struct mmap_file {
+	uintptr_t addr;
+	struct file *file;
+	struct list_elem elem;
+	struct list page_list;
 };
 
 #include "threads/thread.h"
@@ -108,5 +127,11 @@ bool vm_alloc_page_with_initializer (enum vm_type type, void *upage,
 void vm_dealloc_page (struct page *page);
 bool vm_claim_page (void *va);
 enum vm_type page_get_type (struct page *page);
+unsigned spt_hash (const struct hash_elem *elem, void *aux UNUSED);
+static unsigned spt_less (const struct hash_elem *a, const struct hash_elem *b);
+void hash_copy (struct hash_elem *hash_elem, void *aux);
+void hash_destructor (struct hash_elem *hash_elem, void *aux);
+void list_clock_next (struct list *l);
+void vm_down_cow_cnt (struct frame *frame);
 
 #endif  /* VM_VM_H */

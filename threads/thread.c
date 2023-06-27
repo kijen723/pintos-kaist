@@ -124,7 +124,6 @@ thread_init (void) {
 	/* Set up a thread structure for the running thread. */
 	initial_thread = running_thread ();
 	init_thread (initial_thread, "main", PRI_DEFAULT);
-	list_push_back (&all_list, &(initial_thread->all_elem));
 	initial_thread->status = THREAD_RUNNING;
 	initial_thread->tid = allocate_tid ();
 }
@@ -218,19 +217,16 @@ thread_create (const char *name, int priority,
 	t->tf.eflags = FLAG_IF;
 
 	/* Add to run queue. */
-	list_push_back (&all_list, &t->all_elem);
 	list_push_back (&thread_current ()->child_list, &t->child_elem);
 
-	sema_init (&t->sema_exit, 0);
-	sema_init (&t->sema_fork, 0);
-	sema_init (&t->sema_wait, 0);
-	
 	t->fdt = palloc_get_page (PAL_ZERO);
 	if (t->fdt == NULL)
 		return TID_ERROR;
 	t->fdt[0] = 1;
 	t->fdt[1] = 2;
 	t->next_fd = 2;
+	t->stdin_cnt = 1;
+	t->stdout_cnt = 1;
 
 	thread_unblock (t);
 	preemption_priority ();
@@ -317,7 +313,6 @@ thread_exit (void) {
 	/* Just set our status to dying and schedule another process.
 	   We will be destroyed during the call to schedule_tail(). */
 	intr_disable ();
-	list_remove (&thread_current ()->all_elem);
 	do_schedule (THREAD_DYING);
 	NOT_REACHED ();
 }
@@ -347,6 +342,7 @@ thread_set_priority (int new_priority) {
 		return;
 	thread_current ()->init_priority = new_priority;
 	reset_priority ();
+	donate_priority ();
 	preemption_priority ();
 }
 
@@ -391,7 +387,7 @@ thread_get_load_avg (void) {
 	enum intr_level old_level;
 
 	old_level = intr_disable ();
-	int new_load_avg = fp_to_int (mult_mixed (load_avg, 100));
+	int new_load_avg = fp_to_int_round (mult_mixed (load_avg, 100));
 	intr_set_level (old_level);
 
 	return new_load_avg;
@@ -404,7 +400,7 @@ thread_get_recent_cpu (void) {
 	enum intr_level old_level;
 
 	old_level = intr_disable ();
-	int new_recent_cpu = fp_to_int (mult_mixed (thread_current ()->recent_cpu, 100));
+	int new_recent_cpu = fp_to_int_round (mult_mixed (thread_current ()->recent_cpu, 100));
 	intr_set_level (old_level);
 
 	return new_recent_cpu;
@@ -478,6 +474,11 @@ init_thread (struct thread *t, const char *name, int priority) {
 	list_init (&t->child_list);
 	t->nice = NICE_DEFAULT;
 	t->recent_cpu = RECENT_CPU_DEFAULT;
+	list_push_front (&all_list, &t->all_elem);
+	sema_init (&t->sema_wait, 0);
+	sema_init (&t->sema_fork, 0);
+	sema_init (&t->sema_exit, 0);
+	list_init (&t->mmap_list);
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
@@ -601,6 +602,7 @@ do_schedule(int status) {
 	while (!list_empty (&destruction_req)) {
 		struct thread *victim =
 			list_entry (list_pop_front (&destruction_req), struct thread, elem);
+		list_remove (&victim->all_elem);
 		palloc_free_page(victim);
 	}
 	thread_current ()->status = status;
@@ -672,13 +674,13 @@ void
 thread_sleep (int64_t ticks) {
 	struct thread *cur = thread_current ();
 	enum intr_level old_level = intr_disable ();
-	
+
 	if (cur != idle_thread) {
 		next_awake_tick (cur->wakeup_tick = ticks);
 		list_push_back (&sleep_list, &cur->elem);
-		thread_block ();
-		intr_set_level (old_level);
+		do_schedule (THREAD_BLOCKED);
 	}
+	intr_set_level (old_level);
 }
 
 void
@@ -690,10 +692,10 @@ thread_awake (int64_t wakeup_tick) {
 		struct thread *t = list_entry (e, struct thread, elem);
 
 		if (wakeup_tick >= t->wakeup_tick) {
-			e = list_remove (&t->elem);
+			e = list_remove (e);
 			thread_unblock (t);
 		} else {
-			e = list_next (e);
+			e = e->next;
 			next_awake_tick (t->wakeup_tick);
 		}
 	}
@@ -706,7 +708,7 @@ compare_priority (struct list_elem *a, struct list_elem *b, void *aux UNUSED) {
 
 void
 preemption_priority (void) {
-	if (!list_empty (&ready_list) && thread_current ()->priority < list_entry (list_front (&ready_list), struct thread, elem)->priority)
+	if (!intr_context() && !list_empty (&ready_list) && thread_current ()->priority < list_entry (list_front (&ready_list), struct thread, elem)->priority)
 		thread_yield ();
 }
 
@@ -724,9 +726,11 @@ donate_priority (void) {
 		if (cur->wait_on_lock == NULL) {
 			break;
 		} else {
-			struct thread *holder = cur->wait_on_lock->holder;
-			holder->priority = cur->priority;
-			cur = holder;
+			if (cur->wait_on_lock->holder > 0x100)
+				cur = cur->wait_on_lock->holder;
+
+			if (cur->priority < thread_current ()->priority)
+				cur->priority = thread_current ()->priority;
 		}
 	}
 }

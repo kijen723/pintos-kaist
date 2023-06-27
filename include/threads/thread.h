@@ -98,11 +98,15 @@ struct thread {
 	int recent_cpu;
 	int next_fd;
 	int exit_status;
+	int stdin_cnt;
+	int stdout_cnt;
+	uintptr_t user_rsp;
 
 	/* Shared between thread.c and synch.c. */
 	struct lock *wait_on_lock;
 	struct list donations;
 	struct list child_list;
+	struct list mmap_list;
 	struct list_elem donation_elem;
 	struct list_elem elem;              /* List element. */
 	struct list_elem all_elem;
